@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **AV1 spatial-SVC LOC publishing.** A combined AV1 stream is split into
+  dependent `video/s0`, `video/s1`, and `video/s2` tracks with layer-specific
+  dimensions/bitrates, aligned timing, RFC 9626 frame marking, and base-first
+  priority. CMSF/LOCMAF retain the aggregate source; subscriber-side merging is
+  not yet implemented.
+- A reproducible libaom `svc_encoder_rtc` generation path, IVF-to-fragmented-MP4
+  packer, and `assets/testsvc/video.mp4` three-layer acceptance fixture.
 - **AV1 (`av01`) support.** `mlmpub` now serves AV1 video tracks in the CMSF
   namespaces (both CMAF and LOCMAF variants) and the LOC `msf/clear` namespace,
   including ClearKey/ECCP (`cenc`/`cbcs`) and commercial DRM protected variants.

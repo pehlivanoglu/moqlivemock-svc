@@ -6,7 +6,8 @@ sent over MoQ (MediaOverQuic) one frame at a time.
 ## Features
 
 ### Video (Go program)
-- Encodes AVC (libx264), HEVC (libx265), and AV1 (libsvtav1)
+- Encodes AVC (libx264), HEVC (libx265), single-layer AV1 (libsvtav1), and
+  three-layer spatial AV1 SVC (libaom's `svc_encoder_rtc`)
 - All codecs produce only I and P frames (no B-frames / no reordering).
   AV1 uses SVT-AV1 low-delay CBR mode (VBR is not supported for low delay).
 - Video shows codec, bitrate, resolution, time, and frame number
@@ -34,6 +35,8 @@ sent over MoQ (MediaOverQuic) one frame at a time.
   and `libsvtav1` for video, and libfdk_aac for AAC audio. A build that has
   all of these (e.g. Homebrew's `ffmpeg-full`) is required for AV1; point the
   tool at it with `FFMPEG_PATH` if it is not your default `ffmpeg`.
+- AV1 SVC generation additionally requires libaom's official
+  `examples/svc_encoder_rtc` executable. Set `SVC_ENCODER_PATH` to its path.
 
 ## Usage
 
@@ -45,12 +48,26 @@ go run videogen.go -codecs h264,h265,av1
 
 # If your default ffmpeg lacks libsvtav1 or drawtext, point at one that has both:
 FFMPEG_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg go run videogen.go -codecs h264,h265,av1
+
+# Generate the combined three-spatial-layer AV1 fixture.
+SVC_ENCODER_PATH=/path/to/svc_encoder_rtc go run videogen.go -codecs svc
 ```
 
 Output files in `output/` (suffix per codec: `avc`, `hevc`, `av1`):
 - `video_{400,600,900}kbps_avc.mp4`: H.264/AVC video tracks
 - `video_{400,600,900}kbps_hevc.mp4`: HEVC/H.265 video tracks
 - `video_{400,600,900}kbps_av1.mp4`: AV1 video tracks
+- `video.mp4`: combined AV1 SVC stream with cumulative 150/450/900 kbps layers
+  at 320x180, 640x360, and 1280x720
+
+The SVC path first creates a 1280x720, 25 fps, 10-second Y4M with the same
+overlays as the ordinary tracks. It invokes `svc_encoder_rtc` with three spatial
+layers, one temporal layer, scale factors `1/4,1/2,1/1`, and a 25-frame key
+interval. Libaom receives per-layer allocations of 150/300/450 kbps, producing
+cumulative subscription targets of approximately 150/450/900 kbps. The
+`svcivfmp4` helper then groups the three IVF packets sharing each
+PTS, orders them by spatial ID, normalizes global OBUs, and writes one temporal
+unit per fragmented-MP4 sample at timescale 12800 with duration 512.
 
 ### Generate Audio
 

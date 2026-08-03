@@ -27,9 +27,16 @@ func getFFmpegPath() string {
 	return "ffmpeg"
 }
 
+func getSVCEncoderPath() string {
+	if path := os.Getenv("SVC_ENCODER_PATH"); path != "" {
+		return path
+	}
+	return "svc_encoder_rtc"
+}
+
 func main() {
 	// Parse command line flags
-	codecList := flag.String("codecs", "h264", "Comma-separated list of video codecs to generate (h264,h265,av1)")
+	codecList := flag.String("codecs", "h264", "Comma-separated list of video codecs to generate (h264,h265,av1,svc)")
 	fragmentDuration := flag.Int("fragment-duration", 0, "Fragment duration in milliseconds (0 = one sample/fragment)")
 	flag.Parse()
 
@@ -96,6 +103,12 @@ func main() {
 			}
 		}
 	}
+	if codecMap["svc"] {
+		if *fragmentDuration != 0 {
+			log.Fatal("AV1 SVC generation requires -fragment-duration=0 (one temporal unit per fragment)")
+		}
+		generateSVCVideo()
+	}
 
 	fmt.Println("All video files generated successfully!")
 
@@ -137,7 +150,6 @@ func generateVideo(codec string, options []string, bitrateKbps, fragmentDuration
 	}
 	defer logFileHandle.Close()
 
-	fontFile := "resources/RobotoSlab-Regular.ttf"
 	logoFile := "resources/logo.png"
 
 	// Select text color based on bitrate
@@ -153,22 +165,8 @@ func generateVideo(codec string, options []string, bitrateKbps, fragmentDuration
 		textColor = "white"
 	}
 
-	// Scale logo to half size, then rotate so it completes a full turn in 10s
-	logoScale := "scale=iw/2:ih/2"
-	rotationDuration := float64(duration) // 10s for a full rotation
-	rotationExpr := fmt.Sprintf("2*PI*n/(%d*%d)", frameRate, int(rotationDuration))
-	//nolint: lll
-	videoFilter := fmt.Sprintf(
-		"[1:v]%s,format=rgba,rotate='%s':c=none:ow=rotw(iw):oh=roth(ih)[logo];"+
-			"[0:v][logo]overlay=x=20:y=main_h-overlay_h-20:shortest=1[bg];"+
-			"[bg]drawtext=fontfile=%s:text='Codec\\: %s':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=20,"+
-			"drawtext=fontfile=%s:text='Bitrate\\: %d kbps':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=70,"+
-			"drawtext=fontfile=%s:text='Resolution\\: %d x %d':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=120,"+
-			"drawtext=fontfile=%s:text='Time\\: %%{pts\\:hms}':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=170,"+
-			"drawtext=fontfile=%s:text='Frame\\: %%{frame_num}':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=220",
-		logoScale, rotationExpr,
-		fontFile, codecLabel, textColor, fontFile, bitrateKbps, textColor, fontFile, videoWidth, videoHeight, textColor, fontFile, textColor, fontFile, textColor,
-	)
+	videoFilter := buildVideoFilter(codecLabel, fmt.Sprintf("%d kbps", bitrateKbps),
+		fmt.Sprintf("%d x %d", videoWidth, videoHeight), textColor)
 
 	// ffmpeg command line args
 	cmdArgsFirst := []string{
@@ -228,6 +226,84 @@ func generateVideo(codec string, options []string, bitrateKbps, fragmentDuration
 	fmt.Printf("Video generation completed. Log saved to: %s\n", logFile)
 }
 
+func buildVideoFilter(codecLabel, bitrateLabel, resolutionLabel, textColor string) string {
+	fontFile := "resources/RobotoSlab-Regular.ttf"
+	// Scale logo to half size, then rotate so it completes a full turn in 10s.
+	logoScale := "scale=iw/2:ih/2"
+	rotationDuration := float64(duration) // 10s for a full rotation
+	rotationExpr := fmt.Sprintf("2*PI*n/(%d*%d)", frameRate, int(rotationDuration))
+	//nolint: lll
+	videoFilter := fmt.Sprintf(
+		"[1:v]%s,format=rgba,rotate='%s':c=none:ow=rotw(iw):oh=roth(ih)[logo];"+
+			"[0:v][logo]overlay=x=20:y=main_h-overlay_h-20:shortest=1[bg];"+
+			"[bg]drawtext=fontfile=%s:text='Codec\\: %s':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=20,"+
+			"drawtext=fontfile=%s:text='Bitrate\\: %s':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=70,"+
+			"drawtext=fontfile=%s:text='Resolution\\: %s':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=120,"+
+			"drawtext=fontfile=%s:text='Time\\: %%{pts\\:hms}':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=170,"+
+			"drawtext=fontfile=%s:text='Frame\\: %%{frame_num}':fontcolor=%s:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=5:x=20:y=220",
+		logoScale, rotationExpr,
+		fontFile, codecLabel, textColor, fontFile, bitrateLabel, textColor, fontFile, resolutionLabel, textColor, fontFile, textColor, fontFile, textColor,
+	)
+	return videoFilter
+}
+
+func generateSVCVideo() {
+	outputFile := filepath.Join(outputDir, "video.mp4")
+	y4mFile := filepath.Join(outputDir, "video_svc_input.y4m")
+	ivfFile := filepath.Join(outputDir, "video_svc.ivf")
+	logFile := filepath.Join(logDir, "video_svc.log")
+	logFileHandle, err := os.Create(logFile)
+	if err != nil {
+		log.Fatalf("Failed to create SVC log file: %v", err)
+	}
+	defer logFileHandle.Close()
+	defer os.Remove(y4mFile)
+	defer os.Remove(ivfFile)
+	for spatialID := range 3 {
+		defer os.Remove(fmt.Sprintf("%s_%d.av1", ivfFile, spatialID))
+	}
+
+	filter := buildVideoFilter("AV1 SVC", "150 / 450 / 900 kbps cumulative",
+		"320x180 / 640x360 / 1280x720", "white")
+	ffmpegArgs := []string{
+		"-y",
+		"-f", "lavfi",
+		"-i", fmt.Sprintf("testsrc=size=%dx%d:rate=%d:duration=%d:decimals=3", videoWidth, videoHeight, frameRate, duration),
+		"-loop", "1", "-framerate", fmt.Sprintf("%d", frameRate), "-i", "resources/logo.png",
+		"-filter_complex", filter,
+		"-pix_fmt", "yuv420p", "-an", "-f", "yuv4mpegpipe", y4mFile,
+	}
+	if err := runLogged(logFileHandle, getFFmpegPath(), ffmpegArgs...); err != nil {
+		log.Fatalf("Failed to generate SVC Y4M input: %v", err)
+	}
+
+	encoderArgs := []string{
+		"-w", "1280", "-h", "720", "-t", "1/25", "-b", "900",
+		"-sl", "3", "-tl", "1", "-lm", "6", "-k", "25",
+		"-r", "1/4,1/2,1/1", "-bl", "150,300,450",
+		"--min-q=2", "--max-q=56", "-sp", "10", "-th", "4",
+		"--output-obu=0", "--test-decode=1", y4mFile, "-o", ivfFile,
+	}
+	if err := runLogged(logFileHandle, getSVCEncoderPath(), encoderArgs...); err != nil {
+		log.Fatalf("Failed to encode AV1 SVC video: %v", err)
+	}
+
+	if err := runLogged(logFileHandle, "go", "run", "./svcivfmp4", ivfFile, outputFile); err != nil {
+		log.Fatalf("Failed to package AV1 SVC video: %v", err)
+	}
+	fmt.Printf("AV1 SVC video generation completed: %s (log: %s)\n", outputFile, logFile)
+}
+
+func runLogged(logFile *os.File, command string, args ...string) error {
+	cmdString := command + " " + strings.Join(args, " ")
+	fmt.Println(cmdString)
+	_, _ = logFile.WriteString("Command: " + cmdString + "\n\n")
+	cmd := exec.Command(command, args...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	return cmd.Run()
+}
+
 func printActualBitrates(codecMap map[string]bool) {
 	fmt.Println("\nActual average bitrates based on file sizes:")
 	fmt.Println("--------------------------------------------")
@@ -247,6 +323,9 @@ func printActualBitrates(codecMap map[string]bool) {
 			videoFile := filepath.Join(outputDir, fmt.Sprintf("video_%dkbps_av1.mp4", bitrate))
 			printFileBitrate(videoFile, duration)
 		}
+	}
+	if codecMap["svc"] {
+		printFileBitrate(filepath.Join(outputDir, "video.mp4"), duration)
 	}
 }
 

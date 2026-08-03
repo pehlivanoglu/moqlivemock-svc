@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,6 +36,11 @@ const (
 	// vi64 µs-since-epoch ≈ 9 bytes). draft-ietf-moq-transport-16 +
 	// draft-ietf-moq-loc-02 §2.3.1.1.
 	locObjectOverheadBytes = cmafObjectOverheadBytes + 9
+
+	// A two-octet RFC 9626 frame marking is carried as a vi64 value. Its
+	// logical value is >= 2^14 (S and E are set), so MOQT uses four bytes for
+	// the value plus one byte for property ID 0x04.
+	locFrameMarkingOverheadBytes = 5
 )
 
 // ProtectionType identifies how a track is encrypted.
@@ -101,6 +107,34 @@ type CodecSpecificData interface {
 type TrackGroup struct {
 	AltGroupID uint32
 	Tracks     []ContentTrack
+}
+
+// Regular track plus an optional AV1 spatial-layer view
+type LOCTrack struct {
+	ContentTrack *ContentTrack
+	SpatialLayer *AV1SpatialLayer
+}
+
+// <source>/s<spatial-id>.
+func (a *Asset) GetLOCTrackByName(name string) *LOCTrack {
+	for _, group := range a.Groups {
+		for _, original := range group.Tracks {
+			ct := original
+			if ct.Name == name {
+				return &LOCTrack{ContentTrack: &ct}
+			}
+			ad, ok := ct.SpecData.(*AV1Data)
+			if !ok {
+				continue
+			}
+			for i := range ad.spatialLayers {
+				if name == fmt.Sprintf("%s/s%d", ct.Name, ad.spatialLayers[i].SpatialID) {
+					return &LOCTrack{ContentTrack: &ct, SpatialLayer: &ad.spatialLayers[i]}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // GetTrackByName returns a pointer to a ContentTrack with the given name, or nil if not found.
@@ -323,6 +357,18 @@ func InitContentTrack(r io.Reader, name string, audioSampleBatch, videoSampleBat
 	}
 	ct.Duration = uint32(len(ct.Samples)) * ct.SampleDur
 	ct.NrSamples = uint32(len(ct.Samples))
+	if ad, ok := ct.SpecData.(*AV1Data); ok && len(ad.spatialLayers) > 0 {
+		if err := validateAV1SVCGOP(&ct); err != nil {
+			return nil, err
+		}
+		dimensions := make([]string, len(ad.spatialLayers))
+		for i := range ad.spatialLayers {
+			dimensions[i] = fmt.Sprintf("s%d=%dx%d", ad.spatialLayers[i].SpatialID,
+				ad.spatialLayers[i].Width, ad.spatialLayers[i].Height)
+		}
+		slog.Info("detected AV1 spatial SVC", "track", ct.Name,
+			"layerCount", len(ad.spatialLayers), "dimensions", dimensions)
+	}
 	// Calculate sampleBitrate (bits per second)
 	totalBytes := 0
 	for _, s := range ct.Samples {
@@ -334,6 +380,30 @@ func InitContentTrack(r io.Reader, name string, audioSampleBatch, videoSampleBat
 	}
 
 	return &ct, nil
+}
+
+func validateAV1SVCGOP(ct *ContentTrack) error {
+	if ct.TimeScale == 0 || ct.SampleDur == 0 {
+		return fmt.Errorf("AV1 SVC track has invalid timing")
+	}
+	gopDur := uint64(ct.GopLength) * uint64(ct.SampleDur) * 1000
+	want := uint64(MoqGroupDurMS) * uint64(ct.TimeScale)
+	if ct.GopLength == 0 || gopDur != want {
+		return fmt.Errorf("AV1 SVC GOP duration must be %dms", MoqGroupDurMS)
+	}
+	if len(ct.Samples) == 0 {
+		return fmt.Errorf("AV1 SVC track has no samples")
+	}
+	for i := range ct.Samples {
+		expectedSync := uint32(i)%ct.GopLength == 0
+		if ct.Samples[i].IsSync() != expectedSync {
+			return fmt.Errorf("AV1 SVC sample %d sync flag does not align with %dms groups", i, MoqGroupDurMS)
+		}
+		if expectedSync && ct.Samples[i].DecodeTime%uint64(ct.TimeScale) != 0 {
+			return fmt.Errorf("AV1 SVC sample %d decode time does not align with %dms groups", i, MoqGroupDurMS)
+		}
+	}
+	return nil
 }
 
 // LoadAsset opens a directory, reads all *.mp4 files, creates ContentTrack from each,
@@ -814,6 +884,10 @@ func (a *Asset) GenLOCCatalogEntry(generatedAtMS int64) (*Catalog, error) {
 			default:
 				continue // Skip AC-3, EC-3
 			}
+			if sd, ok := ct.SpecData.(*AV1Data); ok && len(sd.spatialLayers) > 0 {
+				tracks = append(tracks, genLOCSVCTracks(&ct, sd, renderGroup)...)
+				continue
+			}
 
 			frameRate := float64(ct.TimeScale) / float64(ct.SampleDur)
 
@@ -908,6 +982,34 @@ func (a *Asset) GenLOCCatalogEntry(generatedAtMS int64) (*Catalog, error) {
 		Tracks:      tracks,
 	}
 	return cat, nil
+}
+
+func genLOCSVCTracks(ct *ContentTrack, ad *AV1Data, renderGroup int) []Track {
+	frameRate := float64(ct.TimeScale) / float64(ct.SampleDur)
+	tracks := make([]Track, 0, len(ad.spatialLayers))
+	for i := range ad.spatialLayers {
+		layer := &ad.spatialLayers[i]
+		name := fmt.Sprintf("%s/s%d", ct.Name, layer.SpatialID)
+		track := Track{
+			Name:        name,
+			Packaging:   "loc",
+			IsLive:      true,
+			Role:        "video",
+			RenderGroup: &renderGroup,
+			SpatialID:   Ptr(int(layer.SpatialID)),
+			Codec:       ad.Codec(),
+			Framerate:   Ptr(frameRate),
+			Bitrate:     Ptr(calcAV1SpatialLOCBitrate(ct, ad, layer)),
+			Width:       Ptr(int(layer.Width)),
+			Height:      Ptr(int(layer.Height)),
+			Language:    ct.Language,
+		}
+		if i > 0 {
+			track.Dependencies = []string{fmt.Sprintf("%s/s%d", ct.Name, layer.SpatialID-1)}
+		}
+		tracks = append(tracks, track)
+	}
+	return tracks
 }
 
 // calcCmafBitrate returns the wire bitrate of a CMAF-packaged track in bits
@@ -1020,6 +1122,29 @@ func calcLOCBitrate(ct *ContentTrack) int {
 		}
 	}
 	return int(float64(ct.SampleBitrate) + 8*extraBytesPerSec)
+}
+
+// A single spatial layer's own wire bitrate
+func calcAV1SpatialLOCBitrate(ct *ContentTrack, ad *AV1Data, layer *AV1SpatialLayer) int {
+	if ct.Duration == 0 || ct.TimeScale == 0 || ct.SampleDur == 0 {
+		return 0
+	}
+	durationSeconds := float64(ct.Duration) / float64(ct.TimeScale)
+	rawBitrate := 8 * float64(layer.totalSize) / durationSeconds
+	objectRate := float64(ct.TimeScale) / float64(ct.SampleDur)
+	extraBytesPerSec := float64(locObjectOverheadBytes+locFrameMarkingOverheadBytes) * objectRate
+	if layer.SpatialID == 0 {
+		configBytes := 0
+		for i := range ct.Samples {
+			if ct.Samples[i].IsSync() {
+				configBytes += len(ad.GenLOCVideoConfigForSample(layer.Samples[i]))
+			}
+		}
+		if configBytes > 0 {
+			extraBytesPerSec += float64(configBytes) / durationSeconds
+		}
+	}
+	return int(rawBitrate + 8*extraBytesPerSec)
 }
 
 // Ptr returns a pointer to any value

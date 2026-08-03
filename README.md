@@ -12,9 +12,8 @@ audio tracks, and dynamically-generated subtitle tracks (WVTT and STPP),
 as well as a client that can receive these streams and even multiplex
 video and audio for playback with ffplay like `mlmsub -muxout - | ffplay -`.
 
-Video tracks use `avc1` (H.264) and `hvc1` (HEVC) sample descriptors with
-parameter sets stored in the init segment, which is required for FairPlay
-DRM support in Safari 26.4+.
+Video tracks use `avc1` (H.264), `hvc1` (HEVC), and `av01` (AV1) sample
+descriptors with decoder configuration stored in the init segment.
 
 The input media is 10s of video and audio which is then disassembled
 into frames. One or more frames are then combined into a MoQ object as a CMAF chunk.
@@ -58,7 +57,7 @@ convention.
 | `cmsf/clear` | CMSF (CMAF chunks) | Always | *(none)* | Unencrypted tracks |
 | `cmsf/drm-{scheme}` | CMSF (CMAF chunks) | `-drmpath` set | `_drm` | Commercial DRM (Widevine/PlayReady/FairPlay via CPIX) |
 | `cmsf/eccp-{scheme}` | CMSF (CMAF chunks) | `-kid`/`-iv` set | `_eccp` | ClearKey/ECCP (explicit key over HTTP) |
-| `msf/clear` | LOC ([draft-mzanaty-moq-loc][LOC]) | Always | *(none)* | AVC video + AAC/Opus audio, clear only |
+| `msf/clear` | LOC ([draft-ietf-moq-loc][LOC]) | Always | *(none)* | AVC/HEVC/AV1 video + AAC/Opus audio, clear only |
 | `moq-mi/clear` | moq-mi ([draft-cenzano-moq-media-interop][moq-mi]) | When asset has AVC + AAC-LC/Opus | *(none)* | Catalogless, fixed track names `video0` / `audio0` |
 
 There is **no separate `locmaf/*` namespace**. The `cmsf/*` catalogs are
@@ -74,10 +73,22 @@ video and audio only.
 
 ### LOC (`msf/clear`)
 
-The LOC namespace uses MSF with `packaging=loc` per
-[draft-ietf-moq-msf-00][MSF] and [draft-mzanaty-moq-loc][LOC]. Objects carry
-raw codec bitstream — AVC as length-prefixed NALUs and AAC as raw frames —
-without any container framing.
+The LOC namespace uses MSF with `packaging=loc` per [MSF][MSF] and [LOC][LOC].
+Objects carry raw codec bitstream without container framing. For a combined
+AV1 spatial-SVC source such as `video.mp4`, the publisher automatically replaces
+the aggregate LOC catalog entry with dependent tracks:
+
+```text
+video/s0  spatialId=0
+video/s1  spatialId=1  depends=["video/s0"]
+video/s2  spatialId=2  depends=["video/s1"]
+```
+
+Every track has aligned group/object IDs and timestamps. RFC 9626 frame marking
+identifies its spatial layer, while sequence configuration is carried only by
+base-layer sync objects. This projection is LOC-only: CMSF continues to expose
+the original combined `video` track. The bundled `mlmsub` does not yet merge
+dependent SVC tracks for playback.
 
 On the subscriber side, `mlmsub` reframes LOC video (length-prefixed NALUs
 → AnnexB) and LOC audio (raw AAC → ADTS) so the output can be piped directly
@@ -430,9 +441,9 @@ Want to know more about Eyevinn and how it is to work here. Contact us at work@e
 
 [moqt]: https://datatracker.ietf.org/doc/draft-ietf-moq-transport/
 [moqt-14]: https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-14
-[MSF]: https://datatracker.ietf.org/doc/html/draft-ietf-moq-msf-00
+[MSF]: https://datatracker.ietf.org/doc/draft-ietf-moq-msf/
 [CMSF]: https://datatracker.ietf.org/doc/html/draft-ietf-moq-cmsf-00
-[LOC]: https://datatracker.ietf.org/doc/html/draft-mzanaty-moq-loc
+[LOC]: https://datatracker.ietf.org/doc/draft-ietf-moq-loc/
 [moq-mi]: https://datatracker.ietf.org/doc/html/draft-cenzano-moq-media-interop
 [moqtransport]: https://github.com/Eyevinn/moqtransport
 [warp-player]: https://github.com/Eyevinn/warp-player

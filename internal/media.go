@@ -353,6 +353,15 @@ type AV1Data struct {
 	height         uint32
 	configOBUs     []byte
 	locNeedsConfig bool
+	spatialLayers  []AV1SpatialLayer
+}
+
+type AV1SpatialLayer struct {
+	SpatialID byte
+	Width     uint32
+	Height    uint32
+	Samples   [][]byte
+	totalSize uint64
 }
 
 // initAV1Data initializes AV1Data from an init segment and samples.
@@ -379,6 +388,10 @@ func initAV1Data(init *mp4.InitSegment, samples []mp4.FullSample) (*AV1Data, err
 	ad.height = sh.Height()
 	ad.codec = sh.CodecString("av01")
 	ad.configOBUs = append([]byte(nil), av1C.ConfigOBUs...)
+	ad.spatialLayers, err = splitAV1SpatialLayers(samples, sh)
+	if err != nil {
+		return nil, fmt.Errorf("could not split AV1 spatial layers: %w", err)
+	}
 
 	// Decide whether LOC needs the sequence header prepended in-band. LOC has
 	// no init segment, so every keyframe must be self-contained. SVT-AV1/ffmpeg
@@ -396,6 +409,100 @@ func initAV1Data(init *mp4.InitSegment, samples []mp4.FullSample) (*AV1Data, err
 	}
 
 	return ad, nil
+}
+
+func splitAV1SpatialLayers(samples []mp4.FullSample, sh *av1.SequenceHeader) ([]AV1SpatialLayer, error) {
+	maxSpatialID := byte(0)
+	spatial := false
+	for sampleNr := range samples {
+		obus, err := av1.SplitOBUs(samples[sampleNr].Data)
+		if err != nil {
+			return nil, fmt.Errorf("sample %d: %w", sampleNr, err)
+		}
+		for _, obu := range obus {
+			if isAV1FrameOBU(obu.Header.Type) && obu.Header.ExtensionFlag && obu.Header.SpatialID > 0 {
+				spatial = true
+				maxSpatialID = max(maxSpatialID, obu.Header.SpatialID)
+			}
+		}
+	}
+	if !spatial {
+		return nil, nil
+	}
+
+	layers := make([]AV1SpatialLayer, int(maxSpatialID)+1)
+	for i := range layers {
+		layers[i].SpatialID = byte(i)
+		layers[i].Samples = make([][]byte, len(samples))
+	}
+	decoder, err := av1.NewFrameHeaderDecoder(sh)
+	if err != nil {
+		return nil, err
+	}
+
+	for sampleNr := range samples {
+		obus, err := av1.SplitOBUs(samples[sampleNr].Data)
+		if err != nil {
+			return nil, fmt.Errorf("sample %d: %w", sampleNr, err)
+		}
+		seenFrame := make([]bool, len(layers))
+		payloads := make([][]byte, len(layers))
+		for obuNr, obu := range obus {
+			spatialID := byte(0)
+
+			if obu.Header.ExtensionFlag && obu.Header.Type != av1.OBUSequenceHeader &&
+				obu.Header.Type != av1.OBUTemporalDelimiter {
+				spatialID = obu.Header.SpatialID
+			}
+			if int(spatialID) >= len(layers) {
+				return nil, fmt.Errorf("sample %d OBU %d: spatial ID %d exceeds maximum %d",
+					sampleNr, obuNr, spatialID, maxSpatialID)
+			}
+			if isAV1LayerOBU(obu.Header.Type) && obu.Header.TemporalID != 0 {
+				return nil, fmt.Errorf("sample %d OBU %d: temporal ID %d is unsupported",
+					sampleNr, obuNr, obu.Header.TemporalID)
+			}
+			if isAV1FrameOBU(obu.Header.Type) {
+				if seenFrame[spatialID] {
+					return nil, fmt.Errorf("sample %d: duplicate frame for spatial ID %d", sampleNr, spatialID)
+				}
+				seenFrame[spatialID] = true
+				fh, err := decoder.ParseFrameHeader(obu.Header.TemporalID, spatialID, obu.Payload)
+				if err != nil {
+					return nil, fmt.Errorf("sample %d OBU %d spatial ID %d: %w", sampleNr, obuNr, spatialID, err)
+				}
+				layers[spatialID].Width = max(layers[spatialID].Width, fh.FrameWidth)
+				layers[spatialID].Height = max(layers[spatialID].Height, fh.FrameHeight)
+			}
+			payloads[spatialID] = append(payloads[spatialID], obu.Encode()...)
+		}
+		for spatialID := range layers {
+			if !seenFrame[spatialID] {
+				return nil, fmt.Errorf("sample %d: missing frame for spatial ID %d", sampleNr, spatialID)
+			}
+			layers[spatialID].Samples[sampleNr] = payloads[spatialID]
+			layers[spatialID].totalSize += uint64(len(payloads[spatialID]))
+		}
+	}
+	for i := range layers {
+		if layers[i].Width == 0 || layers[i].Height == 0 {
+			return nil, fmt.Errorf("spatial ID %d has no coded dimensions", i)
+		}
+	}
+	return layers, nil
+}
+
+func isAV1FrameOBU(t av1.OBUType) bool {
+	return t == av1.OBUFrame || t == av1.OBUFrameHeader
+}
+
+func isAV1LayerOBU(t av1.OBUType) bool {
+	switch t {
+	case av1.OBUFrame, av1.OBUFrameHeader, av1.OBUTileGroup, av1.OBURedundantFrameHeader:
+		return true
+	default:
+		return false
+	}
 }
 
 // keyframeHasAV1SeqHeader reports whether the first sync sample begins with an
@@ -430,6 +537,18 @@ func (d *AV1Data) GenCMAFInitData() ([]byte, error) {
 func (d *AV1Data) GenLOCVideoConfig() []byte {
 	if !d.locNeedsConfig {
 		return nil
+	}
+	return d.configOBUs
+}
+
+func (d *AV1Data) GenLOCVideoConfigForSample(sample []byte) []byte {
+	obus, err := av1.SplitOBUs(sample)
+	if err == nil {
+		for _, obu := range obus {
+			if obu.Header.Type == av1.OBUSequenceHeader {
+				return nil
+			}
+		}
 	}
 	return d.configOBUs
 }

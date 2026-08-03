@@ -369,6 +369,7 @@ func PublishTrack(ctx context.Context, publisher moqtransport.Publisher,
 
 // LOC extension header property IDs from draft-ietf-moq-loc-02 §2.3.1.
 const (
+	locPropFrameMark = 0x04 // vi64: RFC 9626 frame marking in the least-significant bits
 	locPropTimestamp = 0x06 // vi64: microseconds since Unix epoch when no Timescale is present
 )
 
@@ -377,10 +378,15 @@ const (
 // (draft-ietf-moq-loc-02 §2.3.1.1) with the sample presentation time in microseconds
 // since the Unix epoch.
 func PublishLOCTrack(ctx context.Context, publisher moqtransport.Publisher, asset *internal.Asset, trackName string) {
-	ct := asset.GetTrackByName(trackName)
-	if ct == nil {
+	locTrack := asset.GetLOCTrackByName(trackName)
+	if locTrack == nil {
 		slog.Error("track not found", "track", trackName)
 		return
+	}
+	ct := locTrack.ContentTrack
+	spatialID := byte(0)
+	if locTrack.SpatialLayer != nil {
+		spatialID = locTrack.SpatialLayer.SpatialID
 	}
 	timebase := uint64(ct.TimeScale)
 	sampleDur := uint64(ct.SampleDur)
@@ -390,17 +396,18 @@ func PublishLOCTrack(ctx context.Context, publisher moqtransport.Publisher, asse
 	}
 
 	var videoConfig []byte
+	var av1Data *internal.AV1Data
 	switch sd := ct.SpecData.(type) {
 	case *internal.AVCData:
 		videoConfig = sd.GenLOCVideoConfig()
 	case *internal.HEVCData:
 		videoConfig = sd.GenLOCVideoConfig()
 	case *internal.AV1Data:
+		av1Data = sd
 		// nil when keyframes already carry the sequence header OBU in-band
 		// (SVT-AV1/ffmpeg), otherwise the sequence header OBU to prepend.
 		videoConfig = sd.GenLOCVideoConfig()
 	}
-
 	// Optional CTA-608 caption injection (no-op unless -cc608 installed an
 	// enabled generator on this AVC/HEVC video track).
 	captioner := newVideoCaptioner(ct)
@@ -408,12 +415,13 @@ func PublishLOCTrack(ctx context.Context, publisher moqtransport.Publisher, asse
 	now := time.Now().UnixMilli()
 	currGroupNr := internal.CurrMoQGroupNr(ct, uint64(now), internal.MoqGroupDurMS)
 	groupNr := currGroupNr + 1 // Start stream on next group
-	slog.Info("publishing LOC track", "track", trackName, "group", groupNr)
+	slog.Info("publishing LOC track", "track", trackName, "group", groupNr, "spatialID", spatialID)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		sg, err := publisher.OpenSubgroup(groupNr, 0, MediaPriority)
+		priority := locPriority(spatialID)
+		sg, err := publisher.OpenSubgroup(groupNr, 0, priority)
 		if err != nil {
 			slog.Error("failed to open subgroup", "error", err)
 			return
@@ -431,6 +439,10 @@ func PublishLOCTrack(ctx context.Context, publisher moqtransport.Publisher, asse
 			}
 			_, origNr := ct.CalcSample(sampleNr)
 			sample := ct.Samples[origNr]
+			if locTrack.SpatialLayer != nil {
+				sample.Data = locTrack.SpatialLayer.Samples[origNr]
+				sample.Size = uint32(len(sample.Data))
+			}
 			// Splice the frame's CTA-608 SEI before the (optional) videoConfig
 			// prepend, so parameter sets precede the SEI which precedes the VCL.
 			data := captioner.spliceFrame(sample.Data, sei, sampleNr, startNr)
@@ -447,22 +459,12 @@ func PublishLOCTrack(ctx context.Context, publisher moqtransport.Publisher, asse
 				}
 			}
 
-			var payload []byte
-			if videoConfig != nil && sample.IsSync() {
-				payload = make([]byte, 0, len(videoConfig)+len(data))
-				payload = append(payload, videoConfig...)
-				payload = append(payload, data...)
-			} else {
-				payload = data
+			objectConfig := videoConfig
+			if av1Data != nil {
+				objectConfig = av1Data.GenLOCVideoConfigForSample(data)
 			}
-
-			// Compute sampleTime * 1_000_000 / timebase without uint64 overflow.
-			// sampleTime can reach ~1.8e15 for wall-clock-anchored live streams, so a
-			// naive multiply overflows; split into quotient and fractional microseconds.
-			timestampUs := (sampleTime/timebase)*1_000_000 + (sampleTime%timebase)*1_000_000/timebase
-			headers := moqtransport.KVPList{
-				{Type: locPropTimestamp, ValueVarInt: timestampUs},
-			}
+			headers, payload := buildLOCObject(data, sample.IsSync(), sampleTime, timebase,
+				objectConfig, locTrack.SpatialLayer)
 			if _, err := sg.WriteObjectWithHeaders(objectID, headers, payload); err != nil {
 				slog.Error("failed to write LOC object", "track", ct.Name, "group", groupNr,
 					"object", objectID, "error", err)
@@ -478,6 +480,43 @@ func PublishLOCTrack(ctx context.Context, publisher moqtransport.Publisher, asse
 		slog.Debug("published LOC group", "track", ct.Name, "group", groupNr, "objects", objectID)
 		groupNr++
 	}
+}
+
+func buildLOCObject(data []byte, sync bool, sampleTime, timebase uint64, videoConfig []byte,
+	spatialLayer *internal.AV1SpatialLayer) (moqtransport.KVPList, []byte) {
+	payload := data
+	spatialID := byte(0)
+	if spatialLayer != nil {
+		spatialID = spatialLayer.SpatialID
+	}
+	if sync && len(videoConfig) > 0 && (spatialLayer == nil || spatialID == 0) {
+		payload = make([]byte, 0, len(videoConfig)+len(data))
+		payload = append(payload, videoConfig...)
+		payload = append(payload, data...)
+	}
+
+	// Compute sampleTime * 1_000_000 / timebase without uint64 overflow.
+	timestampUs := (sampleTime/timebase)*1_000_000 + (sampleTime%timebase)*1_000_000/timebase
+	headers := moqtransport.KVPList{{Type: locPropTimestamp, ValueVarInt: timestampUs}}
+	if spatialLayer != nil {
+		headers = append(headers, moqtransport.KeyValuePair{
+			Type: locPropFrameMark, ValueVarInt: locFrameMarking(spatialID, sync),
+		})
+	}
+	return headers, payload
+}
+
+func locPriority(spatialID byte) uint8 {
+	return uint8(MediaPriority) + spatialID
+}
+
+// two-octet RFC 9626 scalable-stream form without TL0PICIDX: S=1, E=1, optional I, D=B=TID=0, and LID=spatialID.
+func locFrameMarking(spatialID byte, independent bool) uint64 {
+	first := byte(0xc0)
+	if independent {
+		first |= 0x20
+	}
+	return uint64(first)<<8 | uint64(spatialID)
 }
 
 // PublishSubtitleTrack publishes subtitle track data in MoQ groups, pacing delivery to wall-clock time.
