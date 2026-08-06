@@ -38,6 +38,28 @@ sent over MoQ (MediaOverQuic) one frame at a time.
 - AV1 SVC generation additionally requires libaom's official
   `examples/svc_encoder_rtc` executable. Set `SVC_ENCODER_PATH` to its path.
 
+### Install `svc_encoder_rtc` on Ubuntu
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake git ninja-build ffmpeg
+
+svc_build_dir=$(mktemp -d /tmp/libaom-svc.XXXXXX)
+git clone --depth 1 --branch v3.13.0-rc1 \
+  https://aomedia.googlesource.com/aom "$svc_build_dir/aom"
+cmake -S "$svc_build_dir/aom" -B "$svc_build_dir/build" -G Ninja \
+  -DENABLE_EXAMPLES=1 \
+  -DENABLE_TESTS=0 \
+  -DBUILD_SHARED_LIBS=0 \
+  -DAOM_TARGET_CPU=generic
+cmake --build "$svc_build_dir/build" --target svc_encoder_rtc
+sudo install -m 0755 "$svc_build_dir/build/svc_encoder_rtc" \
+  /usr/local/bin/svc_encoder_rtc
+```
+
+`AOM_TARGET_CPU=generic` avoids a NASM dependency. Remove that option and
+install NASM when an optimized local encoder build is required.
+
 ## Usage
 
 ### Generate Video
@@ -50,7 +72,10 @@ go run videogen.go -codecs h264,h265,av1
 FFMPEG_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg go run videogen.go -codecs h264,h265,av1
 
 # Generate the combined three-spatial-layer AV1 fixture.
-SVC_ENCODER_PATH=/path/to/svc_encoder_rtc go run videogen.go -codecs svc
+SVC_ENCODER_PATH=/usr/local/bin/svc_encoder_rtc go run videogen.go -codecs svc
+
+# Install the generated fixture for mlmpub.
+cp output/video.mp4 ../../assets/testsvc/video.mp4
 ```
 
 Output files in `output/` (suffix per codec: `avc`, `hevc`, `av1`):

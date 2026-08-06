@@ -211,6 +211,82 @@ There are three commands
 The content used is in the `assets/test10s` directory, and was
 generated using the tools in `utils/contentgen`.
 
+### Encode the AV1 spatial-SVC test video
+
+A ready-to-run AV1 spatial-SVC fixture is already included at
+`assets/testsvc/video.mp4`. The steps below are only needed to regenerate it.
+
+Install build tools and FFmpeg on Ubuntu:
+
+```shell
+sudo apt update
+sudo apt install -y build-essential cmake git ninja-build ffmpeg
+```
+
+Build and install libaom's `svc_encoder_rtc` example:
+
+```shell
+svc_build_dir=$(mktemp -d /tmp/libaom-svc.XXXXXX)
+git clone --depth 1 --branch v3.13.0-rc1 \
+  https://aomedia.googlesource.com/aom "$svc_build_dir/aom"
+cmake -S "$svc_build_dir/aom" -B "$svc_build_dir/build" -G Ninja \
+  -DENABLE_EXAMPLES=1 \
+  -DENABLE_TESTS=0 \
+  -DBUILD_SHARED_LIBS=0 \
+  -DAOM_TARGET_CPU=generic
+cmake --build "$svc_build_dir/build" --target svc_encoder_rtc
+sudo install -m 0755 "$svc_build_dir/build/svc_encoder_rtc" \
+  /usr/local/bin/svc_encoder_rtc
+```
+
+Generate the combined three-spatial-layer fragmented MP4 and replace the test
+fixture:
+
+```shell
+cd utils/contentgen
+SVC_ENCODER_PATH=/usr/local/bin/svc_encoder_rtc \
+  go run videogen.go -codecs svc
+cp output/video.mp4 ../../assets/testsvc/video.mp4
+```
+
+The result contains 320x180, 640x360, and 1280x720 AV1 spatial layers. See
+[`utils/contentgen/README.md`](utils/contentgen/README.md) for encoder settings
+and other codecs.
+
+### Run spatial-SVC with WARP Player
+
+From `moqlivemock-svc/cmd/mlmpub`, generate the short-lived certificate when
+needed, then start the publisher:
+
+```shell
+./generate-webtransport-cert.sh
+go run . \
+  -asset ../../assets/testsvc \
+  -cert cert-fp.pem \
+  -key key-fp.pem \
+  -sideport 8081
+```
+
+In another terminal:
+
+```shell
+cd ../../../warp-player-svc
+npm install
+npm start
+```
+
+Open `https://localhost:8080`, then use:
+
+```text
+MoQ server URL:  https://localhost:4443/moq
+Fingerprint URL: http://localhost:8081/fingerprint
+Namespace:       msf/clear
+Engine:          WebCodecs
+```
+
+Choose `video/s0`, `video/s1`, or `video/s2`, then press **Start**. Selecting
+`s1` subscribes `s0+s1`; selecting `s2` subscribes `s0+s1+s2`.
+
 To run the system, first start the publisher
 
 ```shell
