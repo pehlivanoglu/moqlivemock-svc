@@ -64,6 +64,7 @@ type options struct {
 	laURL            string
 	drmConfigPath    string
 	cc608            bool
+	catalogDelay     time.Duration
 	version          bool
 }
 
@@ -96,6 +97,8 @@ func parseOptions(fs *flag.FlagSet, args []string) (*options, error) {
 	fs.StringVar(&opts.drmConfigPath, "drmpath", "", "path to a drm config file")
 	fs.BoolVar(&opts.cc608, "cc608", false,
 		"inject auto-generated CTA-608 CC1 captions into AVC/HEVC video")
+	fs.DurationVar(&opts.catalogDelay, "catalog-delay", 0,
+		"delay the one-shot catalog so relay subscribers can attach")
 	fs.BoolVar(&opts.version, "version", false, fmt.Sprintf("Get %s version", appName))
 	err := fs.Parse(args[1:])
 	return &opts, err
@@ -287,9 +290,10 @@ func runServer(opts *options) error {
 		defer fh.Close()
 	}
 	h := &pub.Handler{
-		Namespaces: namespaces,
-		Asset:      asset,
-		Logfh:      logfh,
+		Namespaces:   namespaces,
+		Asset:        asset,
+		Logfh:        logfh,
+		CatalogDelay: opts.catalogDelay,
 	}
 
 	s := &server{

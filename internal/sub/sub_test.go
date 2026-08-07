@@ -16,6 +16,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDependencyOrder(t *testing.T) {
+	catalog := &internal.Catalog{Tracks: []internal.Track{
+		{Name: "video/s0"},
+		{Name: "video/s1", Dependencies: []string{"video/s0"}},
+		{Name: "video/s2", Dependencies: []string{"video/s1"}},
+	}}
+
+	got, err := dependencyOrder(catalog, "video/s2")
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"video/s0", "video/s1", "video/s2"}, got)
+}
+
 func TestDecryptInitUpdatesCatalogTrack(t *testing.T) {
 	const (
 		kidStr = "39112233445566778899aabbccddeeff"

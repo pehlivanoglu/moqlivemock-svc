@@ -88,7 +88,9 @@ Every track has aligned group/object IDs and timestamps. RFC 9626 frame marking
 identifies its spatial layer, while sequence configuration is carried only by
 base-layer sync objects. This projection is LOC-only: CMSF continues to expose
 the original combined `video` track. The bundled `mlmsub` does not yet merge
-dependent SVC tracks for playback.
+dependent SVC tracks for playback. For load generation,
+`-subscribe-dependencies` subscribes to selected track and its full dependency
+chain while leaving output limited to selected track.
 
 On the subscriber side, `mlmsub` reframes LOC video (length-prefixed NALUs
 → AnnexB) and LOC audio (raw AAC → ADTS) so the output can be piped directly
@@ -307,6 +309,9 @@ You can also specify options for the publisher:
 ```shell
 ./mlmpub -audiobatch 4 -videobatch 2
 ```
+
+For multiple subscribers behind a relay, `-catalog-delay 2s` gives them time to
+attach before the one-shot catalog is sent. The default has no delay.
 
 In another shell, start the subscriber and choose if the video, the audio,
 or a muxed combination should be output, e.g.

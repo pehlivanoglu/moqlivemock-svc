@@ -32,9 +32,10 @@ type NamespaceEntry struct {
 // Handler handles MoQ publisher sessions. It serves catalogs and publishes
 // media tracks (video, audio, subtitles) to subscribers across multiple namespaces.
 type Handler struct {
-	Namespaces []NamespaceEntry
-	Asset      *internal.Asset
-	Logfh      io.Writer
+	Namespaces   []NamespaceEntry
+	Asset        *internal.Asset
+	Logfh        io.Writer
+	CatalogDelay time.Duration
 }
 
 // Handle runs a MoQ session on the given connection, announces all namespaces,
@@ -249,38 +250,20 @@ func (h *Handler) getSubscribeHandler(ctx context.Context) moqtransport.Subscrib
 				return
 			}
 			if m.Track == "catalog" {
-				// Advertise the catalog's largest location so subscribers can
-				// resolve a relative Joining FETCH (offset 0) against this
-				// subscription per MSF draft-01 §5. The catalog is a single full
-				// object at {group:0, object:0}. We still write object 0 on the
-				// subscription below for backward compatibility with
-				// subscribe-only clients; joining clients dedupe it against the
-				// FETCH (objects <= largest are skipped on the subscription).
-				err := w.Accept(moqtransport.WithLargestLocation(&moqtransport.Location{Group: 0, Object: 0}))
+				// Without a delay, advertise {0,0} for relative Joining FETCH.
+				// Delayed mode reports no content yet; otherwise relays treat
+				// object 0 as past when more downstream subscribers attach.
+				var err error
+				if h.CatalogDelay > 0 {
+					err = w.Accept()
+				} else {
+					err = w.Accept(moqtransport.WithLargestLocation(&moqtransport.Location{Group: 0, Object: 0}))
+				}
 				if err != nil {
 					slog.Error("failed to accept subscription", "error", err)
 					return
 				}
-				sg, err := w.OpenSubgroup(0, 0, 0)
-				if err != nil {
-					slog.Error("failed to open subgroup", "error", err)
-					return
-				}
-				json, err := json.Marshal(nsEntry.Catalog)
-				if err != nil {
-					slog.Error("failed to marshal catalog", "error", err)
-					return
-				}
-				_, err = sg.WriteObject(0, json)
-				if err != nil {
-					slog.Error("failed to write catalog", "error", err)
-					return
-				}
-				err = sg.Close()
-				if err != nil {
-					slog.Error("failed to close subgroup", "error", err)
-					return
-				}
+				go PublishCatalog(ctx, w, nsEntry.Catalog, h.CatalogDelay)
 				return
 			}
 			// Check for subtitle tracks first
@@ -319,6 +302,37 @@ func (h *Handler) getSubscribeHandler(ctx context.Context) moqtransport.Subscrib
 				slog.Error("failed to reject subscription", "error", err)
 			}
 		})
+}
+
+// PublishCatalog optionally delays the one-shot catalog, allowing subscribers
+// behind a shared relay to attach before it is forwarded.
+func PublishCatalog(ctx context.Context, publisher moqtransport.Publisher,
+	catalog *internal.Catalog, delay time.Duration) {
+	payload, err := json.Marshal(catalog)
+	if err != nil {
+		slog.Error("failed to marshal catalog", "error", err)
+		return
+	}
+
+	if delay > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+	}
+	sg, err := publisher.OpenSubgroup(0, 0, 0)
+	if err != nil {
+		slog.Error("failed to open catalog subgroup", "error", err)
+		return
+	}
+	if _, err = sg.WriteObject(0, payload); err != nil {
+		slog.Error("failed to write catalog", "error", err)
+		return
+	}
+	if err = sg.Close(); err != nil {
+		slog.Error("failed to close catalog subgroup", "error", err)
+	}
 }
 
 // PublishTrack publishes media track data in MoQ groups, pacing delivery to wall-clock time.

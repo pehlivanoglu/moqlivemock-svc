@@ -36,27 +36,28 @@ Usage of %s:
 `
 
 type options struct {
-	addr         string
-	trackname    string
-	duration     int
-	draft        int
-	muxout       string
-	videoOut     string
-	audioOut     string
-	subsOut      string
-	catalogOut   string
-	qlogfile     string
-	videoname    string
-	audioname    string
-	subsname     string
-	namespace    string
-	loglevel     string
-	fetchCatalog bool
-	catalogMode  string
-	acceptAny    bool
-	discover     bool
-	catalogTrack string
-	version      bool
+	addr                  string
+	trackname             string
+	duration              int
+	draft                 int
+	muxout                string
+	videoOut              string
+	audioOut              string
+	subsOut               string
+	catalogOut            string
+	qlogfile              string
+	videoname             string
+	audioname             string
+	subsname              string
+	namespace             string
+	loglevel              string
+	fetchCatalog          bool
+	catalogMode           string
+	acceptAny             bool
+	discover              bool
+	catalogTrack          string
+	subscribeDependencies bool
+	version               bool
 }
 
 func parseOptions(fs *flag.FlagSet, args []string) (*options, error) {
@@ -88,6 +89,8 @@ func parseOptions(fs *flag.FlagSet, args []string) (*options, error) {
 	fs.BoolVar(&opts.acceptAny, "accept-any", false, "Accept any announced namespace")
 	fs.BoolVar(&opts.discover, "discover", false, "Discovery mode: list announced namespaces and exit")
 	fs.StringVar(&opts.catalogTrack, "catalog-track", "catalog", "Catalog track name (e.g. 'catalog' or 'catalog.json')")
+	fs.BoolVar(&opts.subscribeDependencies, "subscribe-dependencies", false,
+		"Subscribe to the selected video track's dependency chain")
 	fs.IntVar(&opts.draft, "draft", 14, "MoQ Transport draft version (14 or 16)")
 
 	err := fs.Parse(args[1:])
@@ -182,16 +185,17 @@ func runClient(ctx context.Context, opts *options) error {
 	}
 
 	h := &sub.Handler{
-		Namespace:    namespace,
-		Logfh:        logfh,
-		VideoName:    opts.videoname,
-		AudioName:    opts.audioname,
-		SubsName:     opts.subsname,
-		UseFetch:     opts.fetchCatalog,
-		CatalogMode:  opts.catalogMode,
-		AcceptAny:    opts.acceptAny,
-		Discover:     opts.discover,
-		CatalogTrack: opts.catalogTrack,
+		Namespace:             namespace,
+		Logfh:                 logfh,
+		VideoName:             opts.videoname,
+		AudioName:             opts.audioname,
+		SubsName:              opts.subsname,
+		UseFetch:              opts.fetchCatalog,
+		CatalogMode:           opts.catalogMode,
+		AcceptAny:             opts.acceptAny,
+		Discover:              opts.discover,
+		CatalogTrack:          opts.catalogTrack,
+		SubscribeDependencies: opts.subscribeDependencies,
 	}
 
 	outs := make(map[string]io.Writer)

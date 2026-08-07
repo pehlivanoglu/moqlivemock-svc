@@ -26,18 +26,19 @@ const (
 // Handler handles MoQ subscriber sessions. It subscribes to a catalog,
 // selects tracks, and reads media data.
 type Handler struct {
-	Namespace    []string
-	Outs         map[string]io.Writer
-	Logfh        io.Writer
-	VideoName    string
-	AudioName    string
-	SubsName     string
-	UseFetch     bool     // Deprecated: equivalent to CatalogMode == "fetch"
-	CatalogMode  string   // "joining" (default), "subscribe", or "fetch"
-	AcceptAny    bool     // Accept any announced namespace
-	Discover     bool     // Discovery mode: list namespaces and exit
-	CatalogTrack string   // Catalog track name (default "catalog")
-	Protocols    []string // Application protocols offered to the peer (ALPN / WT subprotocol)
+	Namespace             []string
+	Outs                  map[string]io.Writer
+	Logfh                 io.Writer
+	VideoName             string
+	AudioName             string
+	SubsName              string
+	UseFetch              bool     // Deprecated: equivalent to CatalogMode == "fetch"
+	CatalogMode           string   // "joining" (default), "subscribe", or "fetch"
+	AcceptAny             bool     // Accept any announced namespace
+	Discover              bool     // Discovery mode: list namespaces and exit
+	CatalogTrack          string   // Catalog track name (default "catalog")
+	SubscribeDependencies bool     // Subscribe to selected video track dependencies too
+	Protocols             []string // Application protocols offered to the peer (ALPN / WT subprotocol)
 
 	catalog    *internal.Catalog
 	mux        *CmafMux
@@ -345,14 +346,29 @@ func (h *Handler) handle(ctx context.Context, conn moqtransport.Connection) {
 		slog.Info("catalog uses LOC packaging")
 	}
 	if videoTrack != "" {
-		_, err := h.subscribeAndRead(ctx, session, h.Namespace, videoTrack, "video")
-		if err != nil {
-			slog.Error("failed to subscribe to video track", "error", err)
-			err = conn.CloseWithError(0, "internal error")
+		videoTracks := []string{videoTrack}
+		if h.SubscribeDependencies {
+			videoTracks, err = dependencyOrder(h.catalog, videoTrack)
 			if err != nil {
-				slog.Error("failed to close connection", "error", err)
+				slog.Error("failed to resolve video dependencies", "error", err)
+				_ = conn.CloseWithError(0, "invalid video dependencies")
+				return
 			}
-			return
+		}
+		for _, name := range videoTracks {
+			mediaType := "video_dependency"
+			if name == videoTrack {
+				mediaType = "video"
+			}
+			_, err := h.subscribeAndRead(ctx, session, h.Namespace, name, mediaType)
+			if err != nil {
+				slog.Error("failed to subscribe to video track", "track", name, "error", err)
+				err = conn.CloseWithError(0, "internal error")
+				if err != nil {
+					slog.Error("failed to close connection", "error", err)
+				}
+				return
+			}
 		}
 	}
 	if audioTrack != "" {
@@ -386,6 +402,39 @@ func (h *Handler) handle(ctx context.Context, conn moqtransport.Connection) {
 		return
 	}
 	<-ctx.Done()
+}
+
+func dependencyOrder(catalog *internal.Catalog, trackName string) ([]string, error) {
+	ordered := make([]string, 0)
+	visiting := make(map[string]bool)
+	visited := make(map[string]bool)
+	var visit func(string) error
+	visit = func(name string) error {
+		if visited[name] {
+			return nil
+		}
+		if visiting[name] {
+			return fmt.Errorf("video dependency cycle at %q", name)
+		}
+		track := catalog.GetTrackByName(name)
+		if track == nil {
+			return fmt.Errorf("video dependency track %q not found", name)
+		}
+		visiting[name] = true
+		for _, dependency := range track.Dependencies {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		visiting[name] = false
+		visited[name] = true
+		ordered = append(ordered, name)
+		return nil
+	}
+	if err := visit(trackName); err != nil {
+		return nil, err
+	}
+	return ordered, nil
 }
 
 // applyCatalog parses a catalog object payload, stores it as the current

@@ -1,0 +1,6 @@
+.git
+.github
+*.log
+**/*.log
+**/*.pem
+cmd/mlmpub/mkcert
