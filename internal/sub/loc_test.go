@@ -33,6 +33,19 @@ func TestLocTimestampMicros(t *testing.T) {
 	})
 }
 
+func TestGetLOCFrameMarking(t *testing.T) {
+	marking, ok, err := getLOCFrameMarking(moqtransport.KVPList{{
+		Type: locPropFrameMark, ValueVarInt: 0xe002,
+	}})
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, marking.Start)
+	require.True(t, marking.End)
+	require.True(t, marking.Independent)
+	require.Equal(t, byte(2), marking.LayerID)
+}
+
 func TestLOCVideoWriter(t *testing.T) {
 	t.Run("two NALUs", func(t *testing.T) {
 		nalu1 := []byte{0x67, 0x01, 0x02}       // fake SPS

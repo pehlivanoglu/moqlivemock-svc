@@ -13,8 +13,41 @@ import (
 
 // LOC property IDs from draft-ietf-moq-loc-02 §2.3.1.
 const (
+	locPropFrameMark = 0x04
 	locPropTimestamp = 0x06
 )
+
+type locFrameMarking struct {
+	Start         bool
+	End           bool
+	Independent   bool
+	Discardable   bool
+	BaseLayerSync bool
+	TemporalID    byte
+	LayerID       byte
+}
+
+func getLOCFrameMarking(headers moqtransport.KVPList) (locFrameMarking, bool, error) {
+	for _, kv := range headers {
+		if kv.Type != locPropFrameMark {
+			continue
+		}
+		if kv.ValueVarInt > 0xffff {
+			return locFrameMarking{}, true, fmt.Errorf("LOC frame marking exceeds two bytes")
+		}
+		flags := byte(kv.ValueVarInt >> 8)
+		return locFrameMarking{
+			Start:         flags&0x80 != 0,
+			End:           flags&0x40 != 0,
+			Independent:   flags&0x20 != 0,
+			Discardable:   flags&0x10 != 0,
+			BaseLayerSync: flags&0x08 != 0,
+			TemporalID:    flags & 0x07,
+			LayerID:       byte(kv.ValueVarInt),
+		}, true, nil
+	}
+	return locFrameMarking{}, false, nil
+}
 
 // locTimestampMicros returns the LOC Timestamp (ID 0x06) from the object's
 // extension headers, interpreted as microseconds since the Unix epoch

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Eyevinn/locmaf"
 	"github.com/Eyevinn/moqlivemock/internal"
@@ -32,18 +33,23 @@ type Handler struct {
 	VideoName             string
 	AudioName             string
 	SubsName              string
-	UseFetch              bool     // Deprecated: equivalent to CatalogMode == "fetch"
-	CatalogMode           string   // "joining" (default), "subscribe", or "fetch"
-	AcceptAny             bool     // Accept any announced namespace
-	Discover              bool     // Discovery mode: list namespaces and exit
-	CatalogTrack          string   // Catalog track name (default "catalog")
-	SubscribeDependencies bool     // Subscribe to selected video track dependencies too
+	UseFetch              bool   // Deprecated: equivalent to CatalogMode == "fetch"
+	CatalogMode           string // "joining" (default), "subscribe", or "fetch"
+	AcceptAny             bool   // Accept any announced namespace
+	Discover              bool   // Discovery mode: list namespaces and exit
+	CatalogTrack          string // Catalog track name (default "catalog")
+	SubscribeDependencies bool   // Subscribe to selected video track dependencies too
+	SimulatePlayback      bool
+	MinimalBuffer         time.Duration
+	TargetLatency         time.Duration
+	MetricsPath           string
 	Protocols             []string // Application protocols offered to the peer (ALPN / WT subprotocol)
 
 	catalog    *internal.Catalog
 	mux        *CmafMux
 	cenc       *CENC
 	locWriters map[string]interface{ Write([]byte) error } // LOC output writers keyed by media type
+	playback   *nativePlayback
 }
 
 // RunWithConn sets up the mux (if Outs["mux"] is set) and runs the subscriber
@@ -347,13 +353,25 @@ func (h *Handler) handle(ctx context.Context, conn moqtransport.Connection) {
 	}
 	if videoTrack != "" {
 		videoTracks := []string{videoTrack}
-		if h.SubscribeDependencies {
+		if h.SubscribeDependencies || h.SimulatePlayback {
 			videoTracks, err = dependencyOrder(h.catalog, videoTrack)
 			if err != nil {
 				slog.Error("failed to resolve video dependencies", "error", err)
 				_ = conn.CloseWithError(0, "invalid video dependencies")
 				return
 			}
+		}
+		if h.SimulatePlayback || h.MetricsPath != "" {
+			h.playback, err = newNativePlayback(
+				h.catalog, videoTracks, videoTrack, h.SimulatePlayback,
+				h.MinimalBuffer, h.TargetLatency, h.MetricsPath,
+			)
+			if err != nil {
+				slog.Error("failed to initialize native playback", "error", err)
+				_ = conn.CloseWithError(0, "invalid playback configuration")
+				return
+			}
+			go h.playback.run(ctx)
 		}
 		for _, name := range videoTracks {
 			mediaType := "video_dependency"
@@ -719,6 +737,10 @@ func (h *Handler) subscribeAndRead(ctx context.Context, s *moqtransport.Session,
 					return
 				}
 				return
+			}
+			if h.playback != nil && track.Role == "video" {
+				h.playback.addObject(trackname, o.GroupID, o.ObjectID,
+					o.ExtensionHeaders, len(o.Payload), time.Now())
 			}
 			locTsUs, hasLOCTs := locTimestampMicros(o.ExtensionHeaders)
 			if o.ObjectID == 0 {

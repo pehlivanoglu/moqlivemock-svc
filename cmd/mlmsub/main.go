@@ -57,6 +57,10 @@ type options struct {
 	discover              bool
 	catalogTrack          string
 	subscribeDependencies bool
+	simulatePlayback      bool
+	minimalBufferMS       int
+	targetLatencyMS       int
+	metricsPath           string
 	version               bool
 }
 
@@ -91,6 +95,14 @@ func parseOptions(fs *flag.FlagSet, args []string) (*options, error) {
 	fs.StringVar(&opts.catalogTrack, "catalog-track", "catalog", "Catalog track name (e.g. 'catalog' or 'catalog.json')")
 	fs.BoolVar(&opts.subscribeDependencies, "subscribe-dependencies", false,
 		"Subscribe to the selected video track's dependency chain")
+	fs.BoolVar(&opts.simulatePlayback, "simulate-playback", false,
+		"Simulate AV1-SVC decode, buffering, and playback without rendering")
+	fs.IntVar(&opts.minimalBufferMS, "minimal-buffer-ms", 200,
+		"Minimum simulated playback buffer in milliseconds")
+	fs.IntVar(&opts.targetLatencyMS, "target-latency-ms", 300,
+		"Target simulated end-to-end latency in milliseconds")
+	fs.StringVar(&opts.metricsPath, "metrics-path", "",
+		"Atomically write media metrics JSON to this path")
 	fs.IntVar(&opts.draft, "draft", 14, "MoQ Transport draft version (14 or 16)")
 
 	err := fs.Parse(args[1:])
@@ -136,6 +148,9 @@ func runWithOptions(opts *options) error {
 	if opts.version {
 		fmt.Printf("%s %s\n", appName, internal.GetVersion())
 		return nil
+	}
+	if opts.simulatePlayback && (opts.minimalBufferMS < 0 || opts.targetLatencyMS <= opts.minimalBufferMS) {
+		return fmt.Errorf("target-latency-ms must exceed non-negative minimal-buffer-ms")
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -196,6 +211,10 @@ func runClient(ctx context.Context, opts *options) error {
 		Discover:              opts.discover,
 		CatalogTrack:          opts.catalogTrack,
 		SubscribeDependencies: opts.subscribeDependencies,
+		SimulatePlayback:      opts.simulatePlayback,
+		MinimalBuffer:         time.Duration(opts.minimalBufferMS) * time.Millisecond,
+		TargetLatency:         time.Duration(opts.targetLatencyMS) * time.Millisecond,
+		MetricsPath:           opts.metricsPath,
 	}
 
 	outs := make(map[string]io.Writer)
