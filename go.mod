@@ -30,3 +30,6 @@ require (
 )
 
 replace github.com/quic-go/webtransport-go => github.com/Eyevinn/webtransport-go v0.0.0-20260616094103-94b8f28c0917
+
+// Research fork: negotiated packet receive timestamps for RFC 8382 SBD.
+replace github.com/quic-go/quic-go => ./deps/quic-go
