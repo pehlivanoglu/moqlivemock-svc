@@ -69,6 +69,18 @@ func TestAppDataReceivedPacketTrackerECN(t *testing.T) {
 	require.Equal(t, uint64(3), ack.ECNCE)
 }
 
+func TestAppDataReceivedPacketTrackerUsesSharedMonotonicClock(t *testing.T) {
+	tr := newAppDataReceivedPacketTracker(utils.DefaultLogger)
+	tr.enableReceiveTimestamps(2, 0)
+	now := monotime.Now()
+	require.NoError(t, tr.ReceivedPacket(1, protocol.ECNNon, now, true))
+	require.NoError(t, tr.ReceivedPacket(2, protocol.ECNNon, now.Add(2*time.Millisecond), true))
+	ack := tr.GetAckFrame(now.Add(2*time.Millisecond), false)
+	require.Len(t, ack.ReceiveTimestamps, 2)
+	require.Equal(t, uint64(tr.timestampOriginUs+now.Add(2*time.Millisecond).Sub(tr.timestampOrigin).Microseconds()), ack.ReceiveTimestamps[0].Micros)
+	require.Equal(t, uint64(2_000), ack.ReceiveTimestamps[0].Micros-ack.ReceiveTimestamps[1].Micros)
+}
+
 func TestAppDataReceivedPacketTrackerAckEverySecondPacket(t *testing.T) {
 	tr := newAppDataReceivedPacketTracker(utils.DefaultLogger)
 	require.Nil(t, tr.GetAckFrame(monotime.Now(), true))

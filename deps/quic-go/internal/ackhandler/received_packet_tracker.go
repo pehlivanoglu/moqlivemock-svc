@@ -8,6 +8,7 @@ import (
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/utils"
 	"github.com/quic-go/quic-go/internal/wire"
+	"golang.org/x/sys/unix"
 )
 
 const reorderingThreshold = 1
@@ -84,6 +85,7 @@ type appDataReceivedPacketTracker struct {
 	timestampLimit    int
 	timestampExponent uint64
 	timestampOrigin   monotime.Time
+	timestampOriginUs int64
 	timestamps        [256]wire.ReceiveTimestamp
 	timestampCursor   int
 	timestampCount    int
@@ -112,15 +114,28 @@ func newAppDataReceivedPacketTracker(logger utils.Logger) *appDataReceivedPacket
 	return h
 }
 
+func (h *appDataReceivedPacketTracker) enableReceiveTimestamps(limit, exponent uint64) {
+	before := monotime.Now()
+	var now unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &now); err != nil {
+		return
+	}
+	after := monotime.Now()
+	h.timestampLimit = int(min(limit, 256))
+	h.timestampExponent = exponent
+	h.timestampOrigin = before.Add(after.Sub(before) / 2)
+	h.timestampOriginUs = now.Sec*1_000_000 + now.Nsec/1_000
+}
+
 func (h *appDataReceivedPacketTracker) ReceivedPacket(pn protocol.PacketNumber, ecn protocol.ECN, rcvTime monotime.Time, ackEliciting bool) error {
 	if err := h.receivedPacketTracker.ReceivedPacket(pn, ecn, ackEliciting); err != nil {
 		return err
 	}
 	if h.timestampLimit > 0 {
-		if h.timestampOrigin.IsZero() {
-			h.timestampOrigin = rcvTime
-		}
-		stamp := wire.ReceiveTimestamp{Packet: pn, Micros: uint64(max(0, rcvTime.Sub(h.timestampOrigin).Microseconds())) >> h.timestampExponent}
+		// The testbed client and relay share Linux CLOCK_MONOTONIC. Keep the
+		// common clock value so the relay can calculate absolute one-way delay.
+		receiveUs := h.timestampOriginUs + rcvTime.Sub(h.timestampOrigin).Microseconds()
+		stamp := wire.ReceiveTimestamp{Packet: pn, Micros: uint64(max(0, receiveUs)) >> h.timestampExponent}
 		h.timestamps[h.timestampCursor] = stamp
 		h.timestampCursor = (h.timestampCursor + 1) % h.timestampLimit
 		h.timestampCount = min(h.timestampCount+1, h.timestampLimit)

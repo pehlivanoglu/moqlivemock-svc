@@ -59,8 +59,7 @@ func (h *ReceivedPacketHandler) ReceivedPacket(
 }
 
 func (h *ReceivedPacketHandler) EnableReceiveTimestamps(limit, exponent uint64) {
-	h.appDataPackets.timestampLimit = int(min(limit, 256))
-	h.appDataPackets.timestampExponent = exponent
+	h.appDataPackets.enableReceiveTimestamps(limit, exponent)
 }
 
 func (h *ReceivedPacketHandler) IgnorePacketsBelow(pn protocol.PacketNumber) {

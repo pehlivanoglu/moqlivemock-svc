@@ -12,6 +12,12 @@ audio tracks, and dynamically-generated subtitle tracks (WVTT and STPP),
 as well as a client that can receive these streams and even multiplex
 video and audio for playback with ffplay like `mlmsub -muxout - | ffplay -`.
 
+The local quic-go fork reports legacy QUIC receive timestamps in Linux
+`CLOCK_MONOTONIC` microseconds. This supports absolute one-way delay measurement
+when subscriber and relay share one host clock domain, as in the multirelay
+Containernet testbed. Do not interpret these timestamps as absolute OWD across
+physical hosts or distinct time-namespace offsets.
+
 Video tracks use `avc1` (H.264), `hvc1` (HEVC), and `av01` (AV1) sample
 descriptors with decoder configuration stored in the init segment.
 
